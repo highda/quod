@@ -1,0 +1,51 @@
+[workspace]
+name = "quod"
+version = "0.2.0"
+description = "Claude-driven, computation-first mathematics research harness for Apple Silicon"
+authors = ["Quod contributors"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+# MLX wheels start at macOS 14 (Sonoma); pixi otherwise assumes a 13.0 baseline.
+[system-requirements]
+macos = "14.0"
+
+# Every pin below was checked against conda-forge for py3.14 / osx-arm64 builds
+# on 2026-09-19. cvc5 was dropped: there is no conda-forge package by that name.
+# python-flint 0.9.0 exists only on PyPI; conda-forge tops out at 0.8.0.
+[dependencies]
+python = "3.14.*"
+numpy = "==2.5.3"
+scipy = "1.18.*"
+sympy = "1.14.*"
+mpmath = "==1.4.1"
+python-flint = "==0.8.0"
+sage = "==10.9"
+z3-solver = "5.1.*"
+pydantic = "2.13.*"
+typer = "0.27.*"
+rich = "14.*"
+psutil = "7.*"
+pytest = "9.1.*"
+hatchling = "1.27.*"
+
+[pypi-dependencies]
+quod = { path = ".", editable = true }
+mlx = "==0.32.2"
+
+[tasks]
+doctor = "quod doctor"
+init = "quod init"
+test = "pytest -q"
+demo = "quod demo ladder"
+dossier = "quod dossier"
+agent = "./scripts/run-agent.sh"
+lock-check = "pixi install --locked"
+lint = "ruff check src tests"
+
+[feature.dev.dependencies]
+ruff = ">=0.13"
+
+[environments]
+default = { features = [] }
+dev = { features = ["dev"] }

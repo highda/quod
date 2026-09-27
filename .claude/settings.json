@@ -1,0 +1,72 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(quod *)",
+      "Bash(pixi run *)",
+      "Bash(pixi run quod *)",
+      "Bash(python -m quod *)",
+      "Bash(python3 -m quod *)",
+      "Bash(pytest *)",
+      "Bash(lake *)",
+      "Bash(lean *)",
+      "Bash(sage *)",
+      "Bash(ruff *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit(formal/**)",
+      "Write(formal/**)",
+      "Edit(artifacts/**)",
+      "Write(artifacts/**)",
+      "Edit(scratch/**)",
+      "Write(scratch/**)"
+    ],
+    "deny": [
+      "Bash(pixi add *)",
+      "Bash(pixi install *)",
+      "Bash(pixi lock*)",
+      "Bash(pip install *)",
+      "Bash(brew *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(sqlite3 *)",
+      "Read(state/**)",
+      "Edit(state/**)",
+      "Write(state/**)",
+      "Edit(pixi.toml)",
+      "Edit(quod.toml)",
+      "Edit(pixi.lock)",
+      "Edit(CLAUDE.md)",
+      "Edit(.claude/**)",
+      "Read(.env)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/session-start.sh", "timeout": 60 }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/epoch-mark.sh compaction", "timeout": 30 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/epoch-mark.sh stop", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}

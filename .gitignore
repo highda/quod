@@ -1,0 +1,42 @@
+# --- generated reports and notes ---
+# Where `scripts/*-report.py`, `quod ledger export` and `quod library export` write.
+/local/
+
+# --- research state ---
+state/*
+!state/.gitkeep
+artifacts/*
+!artifacts/.gitkeep
+/scratch/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+
+# --- environments / build products ---
+.pixi/
+# pixi.lock IS committed (authoritative resolution) — do not ignore it.
+formal/.lake/
+formal/Quod/Scratch/*
+!formal/Quod/Scratch/.gitkeep
+# proof modules written by runs (the accepted source is stored in state, not in the tree)
+formal/Quod/*.lean
+!formal/Quod/Basic.lean
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- local-only config / secrets ---
+.claude/settings.local.json
+.env
+.env.*
+
+# --- OS / editor ---
+.DS_Store
+.idea/
+.vscode/

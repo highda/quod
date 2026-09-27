@@ -1,0 +1,26 @@
+# Quod configuration. Every value here can be overridden by environment variables
+# (QUOD_PROPOSER_MODEL, QUOD_ADVERSARY_MODEL, QUOD_OVERSEER_MODEL, QUOD_CRITIC_TIMEOUT)
+# or, for the CLI, by explicit flags. Model values are Claude CLI model names or aliases:
+# opus | fable | sonnet | haiku | claude-<full-id>.
+
+[models]
+# Main session: strategy, claims, tool use. Any Claude CLI model name or alias.
+proposer = "claude-fable-5-1"
+# Isolated critic, spawned per claim with tools off. Should be a DIFFERENT model from the proposer
+# so its blind spots do not coincide. Same model = independence from context isolation only.
+adversary = "claude-opus-5-5"
+# Delegated Lean work (`quod formalize`): the model that has to make the kernel agree. Leave it unset to keep
+# the proposer's own model — then the split is a no-op and nothing about the ladder changes. Split it when
+# measurement says your proposer reasons well and loses epochs to the compiler (see docs/EVALUATION.md).
+formalizer = "claude-opus-5-5"
+# Reserved: branch/budget scheduler. Not used yet.
+overseer = "opus"
+
+[formal]
+# Seconds allowed for one Lean kernel check (`quod formal check/attach`, engine ATTACK). Large
+# `decide`-style finite certificates need minutes, and importing Mathlib alone costs 2-5 of them.
+timeout = 900
+
+[critic]
+# Seconds allowed for one adversary pass.
+timeout = 900

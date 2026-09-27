@@ -1,0 +1,6 @@
+id = "sum-odd"
+domain = "number-theory"
+difficulty = 1
+statement = "For every natural number n, the sum of the first n odd positive integers equals n squared."
+acceptance = "theorem target (n : ℕ) : ∑ k in Finset.range n, (2 * k + 1) = n ^ 2 := by sorry"
+notes = "Baseline: should reach formally_proved in one epoch with Lean automation."

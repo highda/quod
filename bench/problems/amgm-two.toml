@@ -1,0 +1,6 @@
+id = "amgm-two"
+domain = "inequalities"
+difficulty = 2
+statement = "For positive reals a and b, (a + b) / 2 ≥ sqrt(a b), with equality iff a = b."
+acceptance = "theorem target (a b : ℝ) (ha : 0 < a) (hb : 0 < b) : Real.sqrt (a * b) ≤ (a + b) / 2 := by sorry"
+notes = "Tests whether the harness finds the squaring reformulation the SMT engine can handle, and Mathlib's existing lemma."

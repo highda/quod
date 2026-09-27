@@ -1,0 +1,6 @@
+id = "nilpotent-trace"
+domain = "linear-algebra"
+difficulty = 3
+statement = "A square matrix over the complex numbers whose k-th power is zero for some k has trace zero."
+acceptance = "theorem target {n : Type*} [Fintype n] [DecidableEq n] (A : Matrix n n ℂ) (h : IsNilpotent A) : A.trace = 0 := by sorry"
+notes = "No polynomial formal block possible for general n; tests library/Mathlib search and formalization without the engine's help."
