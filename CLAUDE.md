@@ -120,7 +120,8 @@ cache/library → `quod premise search` (a lemma you find beats one you prove) �
 `quod search` (wide array scan for counterexamples/witnesses) → CAS/exact arithmetic → `quod certify`
 (sum-of-squares certificate for a polynomial inequality, with its `nlinarith` hint) → SMT → interval
 certification → Lean automation (`simp`, `norm_num`, `ring`, `omega`, `linarith`, `exact?`, `aesop`) →
-`quod formal hammer` → `quod neural-hammer` (if configured) → bounded search → your own reasoning
+`quod formal hammer` → `quod neural-hammer` (if configured: free GPU attempts at routine goals, worth trying
+before you spend reasoning, worthless to argue with when it fails) → bounded search → your own reasoning
 → adversary critique. Skipping rungs is allowed only when a lower rung is provably inapplicable, and you say so.
 
 ## Context lifecycle

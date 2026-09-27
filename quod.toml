@@ -22,8 +22,10 @@ overseer = "opus"
 timeout = 900
 
 [neural]
-# Local model for `quod neural-hammer` (mlx-lm name or path). Empty = off. It generates candidate Lean proofs
-# on Metal that the kernel then accepts or rejects; weights are yours to fetch, and nothing is installed for you.
+# Optional local model for `quod neural-hammer`: a preset name (`quod neural presets`), a Hugging Face repo id,
+# or a local directory. Empty = off. It drafts candidate Lean proofs on Metal that the kernel then accepts or
+# rejects — an extra for routine steps and partials, not a replacement for the proposer. Weights are linked,
+# not shipped: `quod neural pull prover-7b`. The memory guard is derived from the model's own footprint.
 prover_model = ""
 
 [critic]

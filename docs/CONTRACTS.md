@@ -74,7 +74,12 @@ overrun. An engine that cannot handle a claim says `unsupported`; it never appro
 | `quod certify` | a sum-of-squares Gram matrix | `cas` — the rounded identity verified over ℚ — plus an `nlinarith` hint | a certificate whose rational rounding is not exact |
 | `quod conjecture` | closed forms and recurrences | a `speculative` claim, on request | a candidate that only interpolates its own fit |
 | `quod premise` | candidate Mathlib lemmas | nothing; retrieval is not evidence | an index shared across Mathlib revisions |
-| `quod neural-hammer` | candidate Lean proofs | `lean`, when the kernel accepts one; the model is provenance | loading beside a running `lake`, or below its memory floor |
+| `quod neural-hammer` | candidate Lean proofs | `lean`, when the kernel accepts one; the model is provenance | loading beside a running `lake`, below the footprint-derived requirement, or before the weights are fetched |
+
+Local models are linked, not shipped (`quod neural presets|pull|budget`): presets name known-good targets, any
+Hugging Face repo id or local directory is accepted, and the memory requirement for a pass is computed from the
+model's own footprint (weights × load factor + KV allowance for the requested length + headroom) rather than a
+single floor for every model.
 
 Evidence kinds `gpu_batch`, `gpu_search`, `neural_numeric` and `neural_suggestion` sit in the `empirical` row of
 the table in §1 and cannot climb. A GPU or neural result becomes something else only when an exact engine or the

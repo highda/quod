@@ -1,12 +1,19 @@
 """A local model as a hammer: candidate Lean proofs generated on Metal, decided by the kernel.
 
-The economics, not the quality, are the point. A candidate costs GPU seconds and no tokens, and the kernel
-rejects a wrong one for free, so the metric that matters is kernel-accepted proofs per wall hour rather than
-pass@1 — a model that fails most attempts is still worth running before a paid attempt.
+This is an *extra* — idle compute put to work, not a replacement for anything. A local quantised prover will
+not out-reason a frontier model, and on hard goals it mostly will not succeed; what it is good for is partials
+and routine steps, where a candidate costs GPU seconds and no tokens and the kernel rejects a wrong one for
+free. So the metric is kernel-accepted proofs per wall hour, not pass@1: a model that fails most attempts still
+pays for itself if some of its hits would otherwise have cost paid reasoning.
 
-The constraint is memory. On a 16 GB machine a resident model and a Lean build do not coexist: this module
-loads, generates, unloads, and only then compiles. It refuses to load at all when free memory is below a floor
-or a `lake` build is already running, because swapping the compiler out is worse than not trying.
+Weights are linked, never shipped: `PRESETS` names a few known-good targets and any Hugging Face repo id or
+local directory works as well (`quod neural pull`). The feature stays off until a model is configured.
+
+The constraint is memory, and the guard is derived from the model rather than fixed: required space is the
+measured (or declared) weight footprint times a load factor, plus a KV allowance scaled to the requested
+generation length, plus headroom. This module loads, generates, unloads, and only then compiles — on a 16 GB
+machine a resident model and a Lean build do not coexist, and swapping the compiler out is worse than not
+trying, so a running `lake` also blocks the pass.
 
 Nothing here decides anything. A candidate is a string until `formal.check` accepts it; the evidence recorded
 on success is `lean` (the kernel's), and the model's involvement is recorded as provenance only.
@@ -24,7 +31,36 @@ from . import formal
 from .models import Evidence
 from .paths import harness_root
 
-DEFAULT_MIN_FREE_GB = 5.0
+# Models are linked, never shipped: these are download targets with the sizes the guard needs to reason about.
+# `format: mlx` runs as-is through mlx-lm / mlx-embeddings; `needs-convert` is a base checkpoint that has to go
+# through `mlx_lm.convert -q` first. Sizes are the on-disk footprint of the quantised weights.
+PRESETS: dict[str, dict] = {
+    "prover-7b": {
+        "repo": "mlx-community/DeepSeek-Prover-V2-7B-4bit", "role": "prover", "approx_gb": 4.2, "format": "mlx",
+        "note": "Lean 4 prover, 4-bit MLX conversion of deepseek-ai/DeepSeek-Prover-V2-7B. The default choice "
+                "for drafting tactic scripts: small enough to load between compiles.",
+    },
+    "prover-7b-base": {
+        "repo": "deepseek-ai/DeepSeek-Prover-V2-7B", "role": "prover", "approx_gb": 14.0, "format": "needs-convert",
+        "note": "Full-precision source checkpoint. Convert before use: `mlx_lm.convert --hf-path "
+                "deepseek-ai/DeepSeek-Prover-V2-7B -q --q-bits 4`.",
+    },
+    "reasoner-27b-ternary": {
+        "repo": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit", "role": "reasoner", "approx_gb": 5.9, "format": "mlx",
+        "note": "Ternary-weight 27B general reasoner (~1.76 bits/weight). Not Lean-specialised, so weaker at "
+                "tactics than the 7B prover per gigabyte, but a candidate for cheap local critique.",
+    },
+    "encoder-bge-small": {
+        "repo": "mlx-community/bge-small-en-v1.5-8bit", "role": "encoder", "approx_gb": 0.04, "format": "mlx",
+        "note": "Text embedding model for `quod premise index --encoder <repo>`: turns lexical retrieval into "
+                "semantic retrieval. Tiny, and coexists with a Lean build.",
+    },
+}
+KV_CACHE_GB = 0.6          # measured order of magnitude for a 7B at a few thousand tokens of context
+LOAD_OVERHEAD = 1.15       # weights are not the whole resident set
+OS_HEADROOM_GB = 1.0       # leave the machine usable
+MIN_FLOOR_GB = 1.5         # even a tiny encoder should not be loaded into a nearly-full machine
+DEFAULT_MIN_FREE_GB = None  # derived from the model's footprint; an explicit number overrides it
 PROMPT = """Prove this Lean 4 theorem against Mathlib. Reply with ONLY the complete theorem, no prose, no
 explanation, in a single ```lean code block. Do not use `sorry`, `axiom`, `native_decide` or `unsafe`.
 
@@ -77,7 +113,86 @@ def configured_model() -> str:
         return ""
 
 
-def availability(min_free_gb: float = DEFAULT_MIN_FREE_GB) -> HammerReport:
+def resolve_model(name: str) -> tuple[str, dict | None]:
+    """A preset name or a bare Hugging Face repo id. Custom repos are first-class: no allowlist."""
+    if name in PRESETS:
+        return PRESETS[name]["repo"], PRESETS[name]
+    return name, next((v for v in PRESETS.values() if v["repo"] == name), None)
+
+
+def local_path(repo: str) -> "Path | None":
+    """Where the weights are, if they have been fetched: an explicit path, else the Hugging Face cache."""
+    from pathlib import Path  # noqa: PLC0415
+
+    p = Path(repo).expanduser()
+    if p.exists() and p.is_dir():
+        return p
+    cache = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+    d = cache / ("models--" + repo.replace("/", "--"))
+    if d.exists():
+        snaps = sorted((d / "snapshots").glob("*")) if (d / "snapshots").exists() else []
+        return snaps[-1] if snaps else d
+    return None
+
+
+def footprint_gb(repo: str) -> tuple[float, str]:
+    """(gigabytes, how it was determined). Measured on disk when the weights are present, else the preset size."""
+    p = local_path(repo)
+    if p is not None:
+        total = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        if total:
+            return total / 1e9, "measured on disk"
+    _, preset = resolve_model(repo)
+    if preset:
+        return float(preset["approx_gb"]), "preset estimate"
+    return 5.0, "unknown model: assumed 5 GB"
+
+
+def requirement_gb(repo: str, max_tokens: int = 512) -> dict:
+    """What a generation pass actually needs, rather than one fixed floor for every model.
+
+    weights × load overhead + KV cache scaled to the requested generation + headroom for the machine.
+    """
+    weights, how = footprint_gb(repo)
+    kv = KV_CACHE_GB * max(0.25, max_tokens / 2048)
+    need = max(MIN_FLOOR_GB, weights * LOAD_OVERHEAD + kv + OS_HEADROOM_GB)
+    return {"weights_gb": round(weights, 3), "weights_source": how, "kv_gb": round(kv, 2),
+            "required_gb": round(need, 2)}
+
+
+def pull(name: str, dry_run: bool = False) -> dict:
+    """Fetch weights from Hugging Face. Nothing is installed and nothing is vendored: the repository links
+    models, and this downloads one into the local cache when asked."""
+    repo, preset = resolve_model(name)
+    existing = local_path(repo)
+    info = {"model": name, "repo": repo, "preset": bool(preset),
+            "format": (preset or {}).get("format", "unknown"), "note": (preset or {}).get("note"),
+            "already_present": existing is not None,
+            "url": f"https://huggingface.co/{repo}" if "/" in repo else None}
+    if existing is not None:
+        info["path"] = str(existing)
+        info["size_gb"] = round(footprint_gb(repo)[0], 2)
+        return info
+    if dry_run:
+        info["would_download"] = (preset or {}).get("approx_gb")
+        return info
+    if importlib.util.find_spec("huggingface_hub") is None:
+        info["error"] = "huggingface_hub is not in this environment"
+        info["manual"] = [f"pixi add huggingface-hub    # between runs, never during one",
+                          f"hf download {repo} --local-dir models/{repo.split('/')[-1]}",
+                          f"then set [neural] prover_model = \"models/{repo.split('/')[-1]}\" in quod.toml"]
+        return info
+    from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+    t0 = time.perf_counter()
+    path = snapshot_download(repo_id=repo)
+    info.update({"path": path, "seconds": round(time.perf_counter() - t0, 1),
+                 "size_gb": round(footprint_gb(repo)[0], 2),
+                 "next": f'set [neural] prover_model = "{repo}" in quod.toml (or export QUOD_PROVER_MODEL)'})
+    return info
+
+
+def availability(min_free_gb: float | None = DEFAULT_MIN_FREE_GB, max_tokens: int = 512) -> HammerReport:
     """Whether a generation pass may run right now, and if not, exactly what is in the way."""
     model = configured_model()
     if not model:
@@ -86,26 +201,35 @@ def availability(min_free_gb: float = DEFAULT_MIN_FREE_GB) -> HammerReport:
     if importlib.util.find_spec("mlx_lm") is None:
         return HammerReport(False, model, "mlx_lm is not installed in this environment; ledger it rather than "
                                           "installing during a run")
+    repo, _ = resolve_model(model)
+    if local_path(repo) is None:
+        return HammerReport(False, model, f"weights for {repo} are not present locally; fetch them with "
+                                          f"`quod neural pull {model}` (they are linked, not shipped)")
     if lake_running():
         return HammerReport(False, model, "a `lake` build is running: loading a model now would swap out the "
                                           "compiler. Run the hammer between compiles.")
+    need = requirement_gb(repo, max_tokens)
+    floor = need["required_gb"] if min_free_gb is None else min_free_gb
     free = free_memory_gb()
-    if free < min_free_gb:
-        return HammerReport(False, model, f"only {free:.1f} GB free, floor is {min_free_gb:.1f} GB")
+    if free < floor:
+        return HammerReport(False, model,
+                            f"only {free:.1f} GB free; this pass needs about {floor:.1f} GB "
+                            f"({need['weights_gb']} GB of weights [{need['weights_source']}] × {LOAD_OVERHEAD} "
+                            f"+ {need['kv_gb']} GB KV + {OS_HEADROOM_GB} GB headroom)")
     return HammerReport(True, model)
 
 
 def generate(statement: str, n: int = 4, max_tokens: int = 512, temperature: float = 0.7,
-             min_free_gb: float = DEFAULT_MIN_FREE_GB) -> HammerReport:
+             min_free_gb: float | None = DEFAULT_MIN_FREE_GB) -> HammerReport:
     """Load, generate `n` candidates, unload. No compilation happens while the model is resident."""
-    rep = availability(min_free_gb)
+    rep = availability(min_free_gb, max_tokens=max_tokens)
     if not rep.available:
         return rep
     t0 = time.perf_counter()
     try:  # pragma: no cover - requires weights on disk
         from mlx_lm import generate as mlx_generate, load as mlx_load  # noqa: PLC0415
 
-        model, tokenizer = mlx_load(rep.model)
+        model, tokenizer = mlx_load(resolve_model(rep.model)[0])
         prompt = PROMPT.format(statement=statement.strip())
         for i in range(n):
             text = mlx_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, verbose=False,
@@ -146,7 +270,7 @@ def extract_lean(text: str) -> str | None:
 
 
 def hammer(store, claim_id: str, n: int = 4, max_tokens: int = 512, attach: bool = False,
-           min_free_gb: float = DEFAULT_MIN_FREE_GB) -> dict:
+           min_free_gb: float | None = DEFAULT_MIN_FREE_GB) -> dict:
     """Generate candidates for a claim's Lean statement and let the kernel decide."""
     c = store.require_claim(claim_id)
     if not (c.formal and c.formal.lean):

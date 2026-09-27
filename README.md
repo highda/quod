@@ -122,9 +122,21 @@ quod neural-hammer <claim>               # optional: local model drafts Lean, th
   tens of milliseconds). The index is keyed to `(encoder, Mathlib revision)`, so it is rebuilt only when you
   bump the pin — and then only for files whose contents changed. The default encoder needs no weights and
   retrieves lexically through FTS5; a neural encoder is a drop-in for semantic retrieval.
-- **`neural-hammer`** is off until you configure `[neural] prover_model`. It loads, generates candidate proofs,
-  unloads, and only then compiles — on a 16 GB machine a resident model and a Lean build do not coexist, so it
-  refuses while a `lake` build runs or free memory is below its floor.
+- **`neural-hammer`** is an extra, off until you configure `[neural] prover_model`: idle compute put to work on
+  the routine end. A local quantised prover will not out-reason a frontier model and will miss most hard goals,
+  but a candidate costs GPU seconds and no tokens and the kernel rejects a wrong one for free, so the honest
+  metric is kernel-accepted proofs per wall hour rather than pass@1. It loads, generates, unloads, and only then
+  compiles; a running `lake` build or insufficient memory blocks the pass.
+
+Weights are **linked, not shipped**:
+```sh
+quod neural presets              # known-good targets, with sizes and what each is for
+quod neural pull prover-7b       # …or any Hugging Face repo id, or point the config at a local directory
+quod neural budget prover-7b     # what a pass needs, and whether the machine has it right now
+```
+The memory guard is derived from the model rather than fixed: measured (or declared) weight footprint × a load
+factor + a KV allowance scaled to the generation length + headroom. A 40 MB encoder and a 14 GB checkpoint get
+different answers, which is the point.
 
 ## Measuring, not guessing
 `quod trace -b <branch>` shows where an epoch's minutes and tokens went — exploration / recognition /

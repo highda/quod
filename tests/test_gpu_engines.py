@@ -203,21 +203,79 @@ def test_local_prover_is_off_until_configured(root, monkeypatch):
     assert rep.available is False and "prover_model" in rep.reason
 
 
-def test_local_prover_refuses_while_lean_is_building(root, monkeypatch):
+def test_local_prover_refuses_while_lean_is_building(root, monkeypatch, tmp_path):
     monkeypatch.setenv("QUOD_PROVER_MODEL", "some/model")
     monkeypatch.setattr(neural.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(neural, "local_path", lambda repo: tmp_path)
     monkeypatch.setattr(neural, "lake_running", lambda: True)
     rep = neural.availability()
     assert rep.available is False and "lake" in rep.reason
 
 
-def test_local_prover_refuses_under_memory_pressure(root, monkeypatch):
-    monkeypatch.setenv("QUOD_PROVER_MODEL", "some/model")
+def test_local_prover_refuses_under_memory_pressure(root, monkeypatch, tmp_path):
+    monkeypatch.setenv("QUOD_PROVER_MODEL", "prover-7b")
     monkeypatch.setattr(neural.importlib.util, "find_spec", lambda name: object())
     monkeypatch.setattr(neural, "lake_running", lambda: False)
+    monkeypatch.setattr(neural, "local_path", lambda repo: tmp_path)
     monkeypatch.setattr(neural, "free_memory_gb", lambda: 1.0)
-    rep = neural.availability(min_free_gb=5.0)
-    assert rep.available is False and "free" in rep.reason
+    rep = neural.availability()
+    assert rep.available is False
+    assert "needs about" in rep.reason and "headroom" in rep.reason
+
+
+def test_presets_are_well_formed_download_targets():
+    for name, spec in neural.PRESETS.items():
+        assert "/" in spec["repo"], name
+        assert spec["role"] in ("prover", "reasoner", "encoder")
+        assert spec["format"] in ("mlx", "needs-convert")
+        assert spec["approx_gb"] > 0 and spec["note"]
+    assert neural.resolve_model("prover-7b")[0] == "mlx-community/DeepSeek-Prover-V2-7B-4bit"
+    assert neural.resolve_model("some/custom-repo") == ("some/custom-repo", None)   # custom is first-class
+
+
+def test_memory_requirement_follows_the_model_not_a_fixed_floor(monkeypatch):
+    monkeypatch.setattr(neural, "local_path", lambda repo: None)
+    big = neural.requirement_gb("prover-7b-base")          # 14 GB of weights
+    small = neural.requirement_gb("encoder-bge-small")     # 40 MB
+    assert big["required_gb"] > small["required_gb"] * 5
+    assert small["required_gb"] == neural.MIN_FLOOR_GB      # a tiny model still respects the floor
+    assert big["weights_source"] == "preset estimate"
+    longer = neural.requirement_gb("prover-7b", max_tokens=8192)
+    assert longer["kv_gb"] > neural.requirement_gb("prover-7b", max_tokens=256)["kv_gb"]
+
+
+def test_requirement_prefers_measured_weights(tmp_path, monkeypatch):
+    d = tmp_path / "weights"
+    d.mkdir()
+    (d / "model.safetensors").write_bytes(b"0" * 2_000_000)
+    monkeypatch.setattr(neural, "local_path", lambda repo: d)
+    need = neural.requirement_gb("whatever/model")
+    assert need["weights_source"] == "measured on disk"
+    assert need["weights_gb"] == pytest.approx(0.002, abs=1e-3)
+
+
+def test_unfetched_weights_block_the_pass_with_the_pull_command(monkeypatch):
+    monkeypatch.setenv("QUOD_PROVER_MODEL", "prover-7b")
+    monkeypatch.setattr(neural.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(neural, "local_path", lambda repo: None)
+    rep = neural.availability()
+    assert rep.available is False and "quod neural pull prover-7b" in rep.reason
+
+
+def test_pull_explains_itself_without_the_hub_client(monkeypatch):
+    monkeypatch.setattr(neural, "local_path", lambda repo: None)
+    monkeypatch.setattr(neural.importlib.util, "find_spec", lambda name: None)
+    res = neural.pull("prover-7b")
+    assert res["repo"] == "mlx-community/DeepSeek-Prover-V2-7B-4bit"
+    assert res["url"].startswith("https://huggingface.co/")
+    assert "error" in res and any("hf download" in step for step in res["manual"])
+
+
+def test_pull_is_a_no_op_when_the_weights_are_already_there(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text("{}")
+    monkeypatch.setattr(neural, "local_path", lambda repo: tmp_path)
+    res = neural.pull("prover-7b")
+    assert res["already_present"] is True and res["path"] == str(tmp_path)
 
 
 def test_candidate_extraction_from_model_output():

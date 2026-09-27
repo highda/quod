@@ -42,12 +42,13 @@ source_app = typer.Typer(no_args_is_help=True, help="Pull problems from OEIS, Pu
 strategy_app = typer.Typer(no_args_is_help=True, help="Strategy cards: methodology learned from runs.")
 obstruction_app = typer.Typer(no_args_is_help=True, help="Named obstructions: what blocks a target, and what would remove it.")
 premise_app = typer.Typer(no_args_is_help=True, help="Premise retrieval over the pinned Mathlib.")
+neural_app = typer.Typer(no_args_is_help=True, help="Optional local models: presets, downloads, memory budget.")
 contribute_app = typer.Typer(no_args_is_help=True, help="Upstream contributions: gaps that belong in another project (Mathlib, formal-conjectures, OEIS).")
 for name, sub in (("branch", branch_app), ("claim", claim_app), ("epoch", epoch_app), ("checkpoint", checkpoint_app),
                   ("library", library_app), ("ledger", ledger_app), ("bench", bench_app), ("formal", formal_app),
                   ("demo", demo_app), ("source", source_app), ("strategy", strategy_app),
                   ("obstruction", obstruction_app), ("contribute", contribute_app),
-                  ("premise", premise_app)):
+                  ("premise", premise_app), ("neural", neural_app)):
     app.add_typer(sub, name=name)
 
 
@@ -163,7 +164,8 @@ def doctor():
         data["premise_index"] = {"built": False, "error": str(e)}
     avail = neural_mod.availability()
     data["local_prover"] = {"available": avail.available, "model": avail.model or None, "reason": avail.reason or None,
-                            "free_gb": round(neural_mod.free_memory_gb(), 1)}
+                            "free_gb": round(neural_mod.free_memory_gb(), 1),
+                            "presets": sorted(neural_mod.PRESETS)}
     hints = []
     if trusted is not True:
         hints.append("Claude Code has not trusted this directory yet: run `pixi run agent` once and accept the trust "
@@ -447,7 +449,7 @@ def conjecture(values: str = typer.Argument(..., help="comma-separated terms, e.
 
 @app.command("neural-hammer")
 def neural_hammer(claim: str, n: int = 4, max_tokens: int = 512,
-                  min_free_gb: float = neural_mod.DEFAULT_MIN_FREE_GB):
+                  min_free_gb: Optional[float] = typer.Option(None, help="override the footprint-derived floor")):
     """Generate candidate Lean proofs with the configured local model and let the kernel decide.
 
     Loads, generates, unloads, then compiles — never both at once. Refuses when free memory is below the floor
@@ -459,6 +461,41 @@ def neural_hammer(claim: str, n: int = 4, max_tokens: int = 512,
         except StateError as e:
             fail(str(e))
         out(rep)
+
+
+@neural_app.command("presets")
+def neural_presets():
+    """Known-good local models. Weights are linked, not shipped; any Hugging Face repo id works too."""
+    out({"presets": {name: {**spec, "url": f"https://huggingface.co/{spec['repo']}"}
+                     for name, spec in neural_mod.PRESETS.items()},
+         "custom": "quod neural pull <owner/repo>  ·  or point [neural] prover_model at a local directory",
+         "note": "a prover is an extra: it drafts candidates the kernel then accepts or rejects, and is most "
+                 "useful on routine steps and partials"})
+
+
+@neural_app.command("pull")
+def neural_pull(model: str = typer.Argument(..., help="preset name, Hugging Face repo id, or local path"),
+                dry_run: bool = False):
+    """Download weights into the local Hugging Face cache (or print the exact commands if the hub client is absent)."""
+    res = neural_mod.pull(model, dry_run=dry_run)
+    out(res)
+    if res.get("error"):
+        raise typer.Exit(2)
+
+
+@neural_app.command("budget")
+def neural_budget(model: Optional[str] = typer.Argument(None, help="preset, repo id or path; default: configured"),
+                  max_tokens: int = 512):
+    """What a generation pass would need, and whether the machine has it right now."""
+    name = model or neural_mod.configured_model()
+    if not name:
+        fail("no model given and none configured in [neural] prover_model", 1)
+    repo, _ = neural_mod.resolve_model(name)
+    need = neural_mod.requirement_gb(repo, max_tokens)
+    free = neural_mod.free_memory_gb()
+    out({"model": name, "repo": repo, "present_locally": neural_mod.local_path(repo) is not None,
+         **need, "free_gb": round(free, 2), "lake_running": neural_mod.lake_running(),
+         "would_run": free >= need["required_gb"] and not neural_mod.lake_running()})
 
 
 @premise_app.command("index")
