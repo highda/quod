@@ -21,6 +21,11 @@ overseer = "opus"
 # `decide`-style finite certificates need minutes, and importing Mathlib alone costs 2-5 of them.
 timeout = 900
 
+[neural]
+# Local model for `quod neural-hammer` (mlx-lm name or path). Empty = off. It generates candidate Lean proofs
+# on Metal that the kernel then accepts or rejects; weights are yours to fetch, and nothing is installed for you.
+prover_model = ""
+
 [critic]
 # Seconds allowed for one adversary pass.
 timeout = 900

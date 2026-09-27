@@ -95,6 +95,37 @@ What leaves a run lands in its own catalog, never mixed with another:
   where time and tokens went ──► quod trace · scripts/*-report.py       ──► local/reports/*.md
 ```
 
+## Engines: guess wide, verify exactly
+Anything wide and approximate belongs on the GPU; anything that decides truth does not. Metal proposes,
+exact arithmetic and the kernel dispose.
+
+```sh
+quod search <claim> --mode counterexample|witness --box "n=1:100000"   # array scan, survivors rechecked exactly
+quod certify <claim>                     # sum-of-squares certificate → rational identity → nlinarith hint
+quod conjecture 1,1,2,5,14,42            # closed forms and recurrences, fitted exactly over ℚ, validated
+quod premise index                       # one index per pinned Mathlib revision
+quod premise search "Finset sum range"   # candidate lemmas before you write a proof
+quod neural-hammer <claim>               # optional: local model drafts Lean, the kernel decides
+```
+
+- **`search`** compiles a claim's formal block to array operations and scans an integer box; a hit is
+  re-evaluated in exact arithmetic before it counts, so a floating-point near-miss is never a solution. A
+  counterexample refutes the claim; a clean sweep is `gpu_search` evidence, which is `empirical` and stays there
+  — an exhausted finite box is not a proof of the general statement.
+- **`certify`** looks for `p = Σ cᵢ sᵢ²` with rational `cᵢ`: alternating projections on Metal guess the Gram
+  matrix, the guess is rounded to ℚ, and the identity is confirmed symbolically. The numeric stage carries no
+  rigor; what you get is `cas` evidence and the `nlinarith [sq_nonneg …]` hint that turns a Lean search into a
+  check.
+- **`conjecture`** fits polynomials, constant-coefficient recurrences, hypergeometric ratios and scaled forms
+  exactly over ℚ, validating each candidate on terms the fit never saw, and invents nothing from noise.
+- **`premise`** indexes the pinned Mathlib (measured: 184,574 declarations, 94.5 MB, 47 s to build, queries in
+  tens of milliseconds). The index is keyed to `(encoder, Mathlib revision)`, so it is rebuilt only when you
+  bump the pin — and then only for files whose contents changed. The default encoder needs no weights and
+  retrieves lexically through FTS5; a neural encoder is a drop-in for semantic retrieval.
+- **`neural-hammer`** is off until you configure `[neural] prover_model`. It loads, generates candidate proofs,
+  unloads, and only then compiles — on a 16 GB machine a resident model and a Lean build do not coexist, so it
+  refuses while a `lake` build runs or free memory is below its floor.
+
 ## Measuring, not guessing
 `quod trace -b <branch>` shows where an epoch's minutes and tokens went — exploration / recognition /
 verification, tool costs, cache hit ratio, and η (progress per Mtok and per hour) — attributed by dependency

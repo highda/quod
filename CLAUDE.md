@@ -62,6 +62,9 @@ Push every routine step down to the engine; spend tokens only on what only you c
    block is one the engine cannot help you with; say why it has none.
 3. **COMPILE / EXECUTE** — `quod claim check` while drafting, `quod attack <claim>` once added.
    Use the local toolchain (Sage, SymPy, FLINT, Z3, MLX, Lean); never simulate it in your head.
+   Before writing a proof, look for the lemma: `quod premise search "<goal words or identifiers>"`.
+   For an inequality, try `quod certify <claim>` before reasoning: it returns the `nlinarith` hint or nothing.
+   For a conjecture with a search space, `quod search <claim> --box ...` refutes it or bounds it empirically.
    After two failed kernel attempts on a claim you still believe, delegate: `quod formalize <claim> --attach`.
    Deciding *what* to prove and getting Lean to agree are different skills, and the roles may be different models.
 4. **INTEGRATE** — large outputs go to `artifacts/`; only summaries enter the context. Attach evidence with
@@ -113,8 +116,11 @@ Every tool call re-reads the whole context. Batch: write several `quod claim add
 into one shell invocation, and read the combined output once. Never spend a turn per claim.
 
 ## Escalation order (cheapest first)
-cache/library → direct computation → CAS/exact arithmetic → SMT → interval certification → Lean automation
-(`simp`, `norm_num`, `ring`, `omega`, `linarith`, `exact?`, `aesop`) → bounded search → your own reasoning
+cache/library → `quod premise search` (a lemma you find beats one you prove) → direct computation →
+`quod search` (wide array scan for counterexamples/witnesses) → CAS/exact arithmetic → `quod certify`
+(sum-of-squares certificate for a polynomial inequality, with its `nlinarith` hint) → SMT → interval
+certification → Lean automation (`simp`, `norm_num`, `ring`, `omega`, `linarith`, `exact?`, `aesop`) →
+`quod formal hammer` → `quod neural-hammer` (if configured) → bounded search → your own reasoning
 → adversary critique. Skipping rungs is allowed only when a lower rung is provably inapplicable, and you say so.
 
 ## Context lifecycle

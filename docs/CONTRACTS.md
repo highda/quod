@@ -66,6 +66,25 @@ promotes as far as the evidence allows, stopping at the first refutation. Each s
 (`--engine-timeout`, `QUOD_ENGINE_TIMEOUT`, default 180 s, `0` disables) and reports `inconclusive` on
 overrun. An engine that cannot handle a claim says `unsupported`; it never approximates silently.
 
+### 4.1 Wide engines
+
+| command | proposes | records | never |
+|---|---|---|---|
+| `quod search` | counterexamples / witnesses in an integer box | `counterexample` (refutes) after an exact recheck, else `gpu_search` | a float near-miss, an unevaluable expression (reported `unsupported`) |
+| `quod certify` | a sum-of-squares Gram matrix | `cas` — the rounded identity verified over ℚ — plus an `nlinarith` hint | a certificate whose rational rounding is not exact |
+| `quod conjecture` | closed forms and recurrences | a `speculative` claim, on request | a candidate that only interpolates its own fit |
+| `quod premise` | candidate Mathlib lemmas | nothing; retrieval is not evidence | an index shared across Mathlib revisions |
+| `quod neural-hammer` | candidate Lean proofs | `lean`, when the kernel accepts one; the model is provenance | loading beside a running `lake`, or below its memory floor |
+
+Evidence kinds `gpu_batch`, `gpu_search`, `neural_numeric` and `neural_suggestion` sit in the `empirical` row of
+the table in §1 and cannot climb. A GPU or neural result becomes something else only when an exact engine or the
+kernel re-derives it.
+
+The kernel path itself avoids two costs: a snippet without its own imports is compiled against the smallest
+prelude that plausibly covers it (measured: full `import Mathlib` ~3m45s versus ~21s narrow) and retried against
+the full library only if that fails for a missing import; and every settled verdict is cached under
+`formal/Quod/Scratch/.cache`, keyed by source and toolchain identity, so `attach` no longer pays twice.
+
 ## 5. Roles
 
 | role | isolation | tools | what its output is worth |

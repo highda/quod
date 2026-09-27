@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -11,6 +12,25 @@ from pathlib import Path
 from .paths import formal_dir
 
 SCRATCH = "Quod/Scratch"
+CACHE = "Quod/Scratch/.cache"
+
+# Measured on the reference machine: `import Mathlib` costs ~3m45s of mostly-idle wall time (olean loading),
+# a narrow import ~21s. Narrowing is therefore worth an occasional retry: a snippet is compiled against the
+# smallest prelude whose modules cover the identifiers it mentions, and falls back to full Mathlib if that
+# fails for a reason that looks like a missing import.
+NARROW_HINTS: list[tuple[str, str]] = [
+    (r"\b(norm_num|decide|omega|simp|rfl|trivial|linarith|nlinarith|positivity|ring|field_simp|gcongr)\b", "Mathlib.Tactic"),
+    (r"\bFinset\b|\b∑\b|\b∏\b", "Mathlib.Algebra.BigOperators.Basic"),
+    (r"\bNat\.|\bZMod\b|\bPrime\b|\bdvd\b|\b∣\b", "Mathlib.NumberTheory.Divisors"),
+    (r"\bReal\.|\bℝ\b|\bContinuous\b|\bderiv\b|\bTendsto\b", "Mathlib.Analysis.SpecialFunctions.Pow.Real"),
+    (r"\bComplex\.|\bℂ\b", "Mathlib.Analysis.SpecialFunctions.Complex.Log"),
+    (r"\bMatrix\b|\bLinearMap\b|\bBasis\b", "Mathlib.LinearAlgebra.Matrix.Determinant.Basic"),
+    (r"\bPolynomial\b", "Mathlib.Algebra.Polynomial.Basic"),
+    (r"\bMeasure\b|\bμH\b|\bintegral\b|\b∫\b", "Mathlib.MeasureTheory.Integral.Bochner"),
+    (r"\bEquiv\.Perm\b|\bFintype\b|\bcard\b", "Mathlib.Data.Fintype.Card"),
+    (r"\bTopologicalSpace\b|\bIsOpen\b|\bcompact\b", "Mathlib.Topology.Basic"),
+]
+MISSING_IMPORT_RE = re.compile(r"unknown (identifier|constant|namespace)|unknown tactic|has not been imported", re.I)
 
 # Anything that lets a "proof" bypass the kernel or smuggle in assumptions.
 FORBIDDEN = re.compile(r"\b(axiom|native_decide|sorryAx|implemented_by|extern|unsafe|opaque\s+\w+\s*:[^=]*:=\s*sorry)\b")
@@ -72,6 +92,50 @@ class LeanReport:
 
 def lean_available() -> bool:
     return shutil.which("lake") is not None and (formal_dir() / "lakefile.toml").exists()
+
+
+def narrow_imports(body: str) -> list[str]:
+    """The smallest import list that plausibly covers a snippet. Always includes Mathlib.Tactic, because
+    every proof uses tactics and it is the cheapest broad module."""
+    mods = {"Mathlib.Tactic"}
+    for pat, mod in NARROW_HINTS:
+        if re.search(pat, body):
+            mods.add(mod)
+    return sorted(mods)
+
+
+def _cache_path(src: str) -> Path:
+    key = hashlib.sha256((_toolchain_key() + "\0" + src).encode()).hexdigest()[:32]
+    return formal_dir() / CACHE / f"{key}.json"
+
+
+def _toolchain_key() -> str:
+    """Compiler identity: a cached verdict is only valid for the toolchain that produced it."""
+    parts = []
+    for name in ("lean-toolchain", "lake-manifest.json"):
+        p = formal_dir() / name
+        parts.append(hashlib.sha256(p.read_bytes()).hexdigest()[:16] if p.exists() else "-")
+    return "|".join(parts)
+
+
+def cached_verdict(src: str) -> LeanReport | None:
+    p = _cache_path(src)
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text())
+    except Exception:  # noqa: BLE001
+        return None
+    return LeanReport(d["verdict"], d["details"], d.get("path"))
+
+
+def store_verdict(src: str, rep: LeanReport) -> None:
+    """Only settled verdicts are cached: a timeout or an unavailable toolchain says nothing about the source."""
+    if rep.verdict in ("unavailable",) or "timed out" in rep.details:
+        return
+    p = _cache_path(src)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"verdict": rep.verdict, "details": rep.details, "path": rep.path}))
 
 
 def _wrap(statement: str, name_hint: str) -> str:
@@ -137,13 +201,39 @@ def default_timeout() -> int:
         return 900
 
 
-def check(statement: str, name_hint: str = "claim", timeout: int | None = None) -> LeanReport:
-    """Write `statement` to formal/Quod/Scratch/<hash>.lean and compile it with the pinned toolchain.
-    A file containing `sorry` is never a proof."""
+def check(statement: str, name_hint: str = "claim", timeout: int | None = None, narrow: bool = True,
+          imports: list[str] | None = None, use_cache: bool = True) -> LeanReport:
+    """Compile a snippet with the pinned toolchain; `sorry` is never a proof.
+
+    Two costs are avoided here rather than paid every call:
+
+    * **imports** — `import Mathlib` loads the whole library (measured ~3m45s of mostly-idle wall time against
+      ~21s for a narrow import). A statement that does not already carry its own imports is first compiled
+      against the smallest prelude that plausibly covers it, and only retried against full Mathlib if that
+      fails for a reason that looks like a missing import.
+    * **repetition** — a settled verdict is cached under `formal/Quod/Scratch/.cache`, keyed by the exact
+      source and the toolchain identity, so re-checking the same text (which `attach` does by design) is free.
+    """
+    if imports is not None:
+        narrow = False
+    body = statement.strip()
+    if not re.match(r"^import\b", body) and (narrow or imports is not None):
+        mods = imports if imports is not None else narrow_imports(body)
+        narrowed = "\n".join(f"import {m}" for m in mods) + "\n\nnamespace Quod.Scratch\n\n" + body + "\n\nend Quod.Scratch\n"
+        rep = _check_source(narrowed, name_hint, timeout, use_cache)
+        if rep.verdict not in ("failed", "statement_error") or not MISSING_IMPORT_RE.search(rep.details):
+            return rep
+        # the narrow prelude was not enough; pay for the full library once
+    return _check_source(_wrap(statement, name_hint), name_hint, timeout, use_cache)
+
+
+def _check_source(src_in: str, name_hint: str = "claim", timeout: int | None = None,
+                  use_cache: bool = True) -> LeanReport:
+    """Compile exactly this source (already wrapped). The single place that runs the compiler."""
     if not lean_available():
         return LeanReport("unavailable", "lake not on PATH or formal/lakefile.toml missing; run scripts/formal-setup.sh")
     timeout = default_timeout() if timeout is None else timeout
-    src = _wrap(statement, name_hint)
+    src = src_in
     has_sorry = re.search(r"\bsorry\b", src) is not None
     forbidden = sorted({m.group(1) for m in FORBIDDEN.finditer(src)})
     if forbidden:
@@ -160,6 +250,8 @@ def check(statement: str, name_hint: str = "claim", timeout: int | None = None) 
     path = formal_dir() / SCRATCH / f"{safe}_{digest}.lean"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(src)
+    if use_cache and (hit := cached_verdict(src)) is not None:
+        return LeanReport(hit.verdict, hit.details, str(path))
     build_err = build_modules(_extra_modules(src))
     if build_err:
         return LeanReport("failed", f"dependency build failed: {build_err}", str(path))
@@ -171,21 +263,39 @@ def check(statement: str, name_hint: str = "claim", timeout: int | None = None) 
         return LeanReport("failed", f"lean timed out after {timeout}s", str(path))
     out = (proc.stdout + proc.stderr).strip()
     ok = proc.returncode == 0 and "error" not in out.lower()
+
+    def settle(rep: LeanReport) -> LeanReport:
+        if use_cache:
+            store_verdict(src, rep)
+        return rep
+
     if has_sorry:
         # Compiling a statement with `sorry` checks that the *statement* is well-formed on the pinned Mathlib.
-        return LeanReport("statement_ok" if ok else "statement_error",
-                          ("statement compiles; `sorry` means it is not a proof" if ok else _errors_first(out)), str(path))
+        return settle(LeanReport("statement_ok" if ok else "statement_error",
+                                 ("statement compiles; `sorry` means it is not a proof" if ok else _errors_first(out)), str(path)))
     if ok:
         if not decls:
-            return LeanReport("compiled", "file compiles but declares no theorem/lemma; nothing was proved", str(path))
+            return settle(LeanReport("compiled", "file compiles but declares no theorem/lemma; nothing was proved", str(path)))
         used = set()
         for m in re.finditer(r"depends on axioms: \[([^\]]*)\]", out):
             used |= {a.strip() for a in m.group(1).split(",") if a.strip()}
         extra = sorted(used - ALLOWED_AXIOMS)
         if extra:
-            return LeanReport("failed", f"proof depends on non-standard axioms {extra} (#print axioms); allowed: {sorted(ALLOWED_AXIOMS)}", str(path))
-        return LeanReport("proved", f"kernel accepted {', '.join(decls)}; axioms ⊆ {sorted(ALLOWED_AXIOMS)}", str(path))
-    return LeanReport("failed", _errors_first(out), str(path))
+            return settle(LeanReport("failed", f"proof depends on non-standard axioms {extra} (#print axioms); allowed: {sorted(ALLOWED_AXIOMS)}", str(path)))
+        return settle(LeanReport("proved", f"kernel accepted {', '.join(decls)}; axioms ⊆ {sorted(ALLOWED_AXIOMS)}", str(path)))
+    return settle(LeanReport("failed", _errors_first(out), str(path)))
+
+
+def _normalize(src: str) -> str:
+    """Compare sources up to layout and the #print axioms block the checker appends itself."""
+    src = re.sub(r"^#print axioms .*$", "", src, flags=re.M)
+    return "\n".join(line.rstrip() for line in src.split("\n") if line.strip())
+
+
+def same_source(compiled: str, stored: str, name_hint: str = "claim") -> bool:
+    """True when re-wrapping the stored form would hand the compiler the text it just accepted, so the
+    stored-form re-check cannot say anything new."""
+    return _normalize(compiled) == _normalize(_wrap(stored, name_hint))
 
 
 def check_file(path: str | Path, timeout: int | None = None) -> LeanReport:

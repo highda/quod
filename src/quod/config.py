@@ -27,6 +27,7 @@ class ModelConfig:
     formalizer: str
     critic_timeout: int
     lean_timeout: int
+    prover_model: str
     source: dict[str, str]  # role -> where the value came from
 
     def warnings(self) -> list[str]:
@@ -72,4 +73,8 @@ def resolve(proposer: str | None = None, adversary: str | None = None,
             out[role], src[role] = DEFAULT_MODEL, "default"
     timeout = int(os.environ.get("QUOD_CRITIC_TIMEOUT", cfg.get("critic", {}).get("timeout", 900)))
     lean_timeout = int(os.environ.get("QUOD_LEAN_TIMEOUT", cfg.get("formal", {}).get("timeout", 900)))
-    return ModelConfig(out["proposer"], out["adversary"], out["overseer"], out["formalizer"], timeout, lean_timeout, src)
+    # Local, weights-on-disk model for `quod neural-hammer`. Empty means the feature is off, which is the
+    # default: it needs multi-gigabyte weights that this repository does not ship.
+    prover_model = os.environ.get("QUOD_PROVER_MODEL", cfg.get("neural", {}).get("prover_model", "")) or ""
+    return ModelConfig(out["proposer"], out["adversary"], out["overseer"], out["formalizer"], timeout,
+                       lean_timeout, prover_model, src)

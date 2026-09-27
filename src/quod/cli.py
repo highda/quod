@@ -15,7 +15,9 @@ import typer
 
 from . import __version__, attack as attack_mod, bench as bench_mod, bench_gen, critic as critic_mod, demo as demo_mod
 from . import config as config_mod, dossier as dossier_mod, expand, formal as formal_mod, ingest, propose as propose_mod, sources
-from . import formalize as formalize_mod, strategy as strategy_mod, trace as trace_mod
+from . import conjecture as conjecture_mod, formalize as formalize_mod, neural as neural_mod
+from . import premise as premise_mod, search as search_mod, sos as sos_mod, strategy as strategy_mod
+from . import trace as trace_mod
 from .compute import capabilities, choose_backend, workspace_trusted
 from .library import Library, LibraryError
 from .models import (
@@ -39,11 +41,13 @@ demo_app = typer.Typer(no_args_is_help=True, help="Smoke tests.")
 source_app = typer.Typer(no_args_is_help=True, help="Pull problems from OEIS, PutnamBench, formal-conjectures.")
 strategy_app = typer.Typer(no_args_is_help=True, help="Strategy cards: methodology learned from runs.")
 obstruction_app = typer.Typer(no_args_is_help=True, help="Named obstructions: what blocks a target, and what would remove it.")
+premise_app = typer.Typer(no_args_is_help=True, help="Premise retrieval over the pinned Mathlib.")
 contribute_app = typer.Typer(no_args_is_help=True, help="Upstream contributions: gaps that belong in another project (Mathlib, formal-conjectures, OEIS).")
 for name, sub in (("branch", branch_app), ("claim", claim_app), ("epoch", epoch_app), ("checkpoint", checkpoint_app),
                   ("library", library_app), ("ledger", ledger_app), ("bench", bench_app), ("formal", formal_app),
                   ("demo", demo_app), ("source", source_app), ("strategy", strategy_app),
-                  ("obstruction", obstruction_app), ("contribute", contribute_app)):
+                  ("obstruction", obstruction_app), ("contribute", contribute_app),
+                  ("premise", premise_app)):
     app.add_typer(sub, name=name)
 
 
@@ -153,6 +157,13 @@ def doctor():
     data["state_exists"] = state_db().exists()
     trusted = workspace_trusted(harness_root())
     data["claude_workspace_trusted"] = trusted
+    try:
+        data["premise_index"] = premise_mod.status()
+    except Exception as e:  # noqa: BLE001 - doctor never fails on a subsystem
+        data["premise_index"] = {"built": False, "error": str(e)}
+    avail = neural_mod.availability()
+    data["local_prover"] = {"available": avail.available, "model": avail.model or None, "reason": avail.reason or None,
+                            "free_gb": round(neural_mod.free_memory_gb(), 1)}
     hints = []
     if trusted is not True:
         hints.append("Claude Code has not trusted this directory yet: run `pixi run agent` once and accept the trust "
@@ -161,6 +172,9 @@ def doctor():
         hints.append("Lean not installed: the top rung (formally_proved) is unreachable. Run scripts/formal-setup.sh.")
     if not data["mlx_metal"]:
         hints.append("MLX cannot see Metal; GPU workloads will fall back to CPU.")
+    if not data["premise_index"].get("built"):
+        hints.append("No premise index for the pinned Mathlib: `quod premise index` (once per revision) makes "
+                     "premise search available.")
     data["hints"] = hints
     out(data)
 
@@ -175,6 +189,7 @@ def config(key: Optional[str] = typer.Argument(None, help="e.g. models.proposer;
     data = {"models": {"proposer": cfg.proposer, "adversary": cfg.adversary, "overseer": cfg.overseer,
                        "formalizer": cfg.formalizer},
             "critic": {"timeout": cfg.critic_timeout}, "formal": {"timeout": cfg.lean_timeout},
+            "neural": {"prover_model": cfg.prover_model or None},
             "source": cfg.source, "warnings": cfg.warnings()}
     if key:
         node = data
@@ -359,6 +374,112 @@ def formalize(claim: str, model: Optional[str] = None, max_turns: int = 40,
         out(rep)
         if not dry_run and rep.get("verdict") != "proved":
             raise typer.Exit(2)
+
+
+@app.command()
+def search(claim: str, mode: str = typer.Option("counterexample", help="counterexample | witness"),
+           box: Optional[str] = typer.Option(None, help='per-variable ranges, e.g. "n=0:10000,k=1:50"'),
+           lo: int = -64, hi: int = 64, max_candidates: int = 4_000_000, want: int = 8,
+           cpu: bool = typer.Option(False, help="force the numpy fallback instead of Metal")):
+    """Wide array search over an integer box for counterexamples or witnesses; survivors are rechecked exactly.
+
+    A refutation is recorded as `counterexample` evidence (the claim is refuted); anything else is recorded as
+    `gpu_search`, which is `empirical` and cannot climb — an exhausted finite box is not a proof."""
+    _refuse_if_ablated("engines", "quod search")
+    ranges = None
+    if box:
+        ranges = {}
+        for part in box.split(","):
+            name, _, rng = part.partition("=")
+            a, _, b = rng.partition(":")
+            ranges[name.strip()] = (int(a), int(b))
+    with store() as s:
+        try:
+            out(search_mod.attack(s, claim, mode=mode, box=ranges, default_range=(lo, hi),
+                                  max_candidates=max_candidates, want=want, prefer_gpu=not cpu))
+        except StateError as e:
+            fail(str(e))
+
+
+@app.command()
+def certify(claim: str, half_degree: Optional[int] = None, restarts: int = 3,
+            cpu: bool = typer.Option(False, help="force the numpy fallback instead of Metal")):
+    """Find a sum-of-squares certificate for a polynomial inequality: guessed numerically, rounded to rationals,
+    verified exactly, and returned with the `nlinarith` hint list that lets the kernel check it in one step."""
+    _refuse_if_ablated("engines", "quod certify")
+    with store() as s:
+        try:
+            rep = sos_mod.attack(s, claim, half_degree=half_degree, restarts=restarts, prefer_gpu=not cpu)
+        except StateError as e:
+            fail(str(e))
+        out(rep)
+        if rep.get("verdict") not in ("certified", None):
+            raise typer.Exit(2)
+
+
+@app.command()
+def conjecture(values: str = typer.Argument(..., help="comma-separated terms, e.g. 1,1,2,5,14,42"),
+               max_degree: int = 6, max_order: int = 5,
+               claim: Optional[str] = typer.Option(None, help="record the best candidate as this claim id"),
+               branch: Optional[str] = typer.Option(None, "--branch", "-b")):
+    """Fit closed forms and recurrences to a sequence, exactly over ℚ, validated on terms the fit never saw.
+
+    Candidates are conjectures: with --claim the best one is stored as a `speculative` claim for the engines to
+    attack, never as evidence."""
+    seq = [v.strip() for v in values.split(",") if v.strip()]
+    rep = conjecture_mod.analyze(seq, max_degree=max_degree, max_order=max_order)
+    res = conjecture_mod.render(rep)
+    best = rep.best()
+    if claim and best is not None:
+        if not branch:
+            fail("--claim needs --branch")
+        with store() as s:
+            try:
+                fc = best.formal()
+                s.add_claim(Claim(id=claim, branch_id=branch, statement=f"Conjectured from {len(seq)} terms: "
+                                                                       f"{best.description}",
+                                  formal=fc, tags=["conjecture"]))
+                res["recorded_claim"] = claim
+            except (StateError, ValueError) as e:
+                res["record_failed"] = str(e)
+    out(res)
+
+
+@app.command("neural-hammer")
+def neural_hammer(claim: str, n: int = 4, max_tokens: int = 512,
+                  min_free_gb: float = neural_mod.DEFAULT_MIN_FREE_GB):
+    """Generate candidate Lean proofs with the configured local model and let the kernel decide.
+
+    Loads, generates, unloads, then compiles — never both at once. Refuses when free memory is below the floor
+    or a `lake` build is running."""
+    _refuse_if_ablated("engines", "quod neural-hammer")
+    with store() as s:
+        try:
+            rep = neural_mod.hammer(s, claim, n=n, max_tokens=max_tokens, min_free_gb=min_free_gb)
+        except StateError as e:
+            fail(str(e))
+        out(rep)
+
+
+@premise_app.command("index")
+def premise_index(encoder: str = "hash", limit_files: Optional[int] = None):
+    """Build or refresh the premise index for the pinned Mathlib revision. Only changed files are re-read."""
+    res = premise_mod.build(encoder_name=encoder, limit_files=limit_files,
+                            progress=lambda m: typer.echo(m, err=True))
+    out(res)
+
+
+@premise_app.command("search")
+def premise_search(query: str, k: int = 12, encoder: str = "hash",
+                   mode: str = typer.Option("auto", help="auto | lexical | vector"),
+                   cpu: bool = typer.Option(False, help="force the numpy fallback for vector mode")):
+    """Candidate Mathlib premises for a goal. Cheaper than rediscovering a lemma, and far cheaper than proving it."""
+    out(premise_mod.search(query, k=k, encoder_name=encoder, mode=mode, prefer_gpu=not cpu))
+
+
+@premise_app.command("status")
+def premise_status(encoder: str = "hash"):
+    out(premise_mod.status(encoder_name=encoder))
 
 
 @app.command()
@@ -925,8 +1046,13 @@ def formal_attach(claim: str, file: Path, promote: bool = True,
                 if bad:
                     fail("frozen statement violated — the file proves something other than the imported target:\n" + "\n".join(bad), 2)
             stored = formal_mod.unwrap(Path(rep.path).read_text())
-            # The claim stores this text, not the file: it must be reproducible on its own.
-            rep2 = formal_mod.check(stored, name_hint=f"{claim}_stored", timeout=timeout)
+            # The claim stores this text, not the file: it must be reproducible on its own. Re-wrapping the
+            # stored form often reproduces the very source just compiled, and compiling it again cost a second
+            # full Mathlib load; when the text is identical, the first verdict already answers the question.
+            if formal_mod.same_source(Path(rep.path).read_text(), stored, f"{claim}_stored"):
+                rep2 = rep
+            else:
+                rep2 = formal_mod.check(stored, name_hint=f"{claim}_stored", timeout=timeout)
             if rep2.verdict != "proved":
                 fail(f"accepted file does not recompile in stored form ({rep2.verdict}): {rep2.details[:400]}", 2)
             s.add_evidence(claim, Evidence(kind="lean", summary="kernel accepted (file and stored form)", produced_by="engine:lean", artifact=rep.path))
